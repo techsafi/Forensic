@@ -163,9 +163,9 @@ function LinguistApp() {
 
       const result = JSON.parse(response.text);
       setScanResult(result);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Scan failed:", err);
-      setError("Failed to analyze text. Please try again.");
+      setError(`Scan failed: ${err.message || "An unexpected error occurred. Check your API key and network."}`);
     } finally {
       setIsScanning(false);
     }
@@ -215,9 +215,9 @@ function LinguistApp() {
 
       const result = JSON.parse(response.text);
       setHumanizeResult(result);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Humanization failed:", err);
-      setError("Failed to humanize text. Please try again.");
+      setError(`Humanization failed: ${err.message || "An unexpected error occurred. Check your API key and network."}`);
     } finally {
       setIsHumanizing(false);
     }
