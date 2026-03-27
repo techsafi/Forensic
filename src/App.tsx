@@ -44,9 +44,61 @@ interface HumanizeResult {
 
 const GEMINI_MODEL = "gemini-3-flash-preview";
 
+// --- Components ---
+
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-[#E4E3E0] flex items-center justify-center p-6 text-center">
+          <div className="max-w-md p-8 bg-white border border-[#141414] shadow-[8px_8px_0px_0px_rgba(20,20,20,1)]">
+            <AlertCircle className="w-12 h-12 text-red-600 mx-auto mb-4" />
+            <h2 className="font-serif italic text-2xl mb-4">System Malfunction</h2>
+            <p className="text-xs font-mono opacity-70 mb-6 leading-relaxed">
+              An unexpected error has occurred. This could be due to a configuration mismatch or a runtime exception.
+            </p>
+            <div className="bg-red-50 p-4 border border-red-200 text-[10px] font-mono text-red-700 text-left mb-6 overflow-auto max-h-32">
+              {this.state.error?.message}
+            </div>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full py-3 bg-[#141414] text-[#E4E3E0] text-[11px] uppercase tracking-widest font-bold hover:bg-opacity-90 transition-all"
+            >
+              Restart System
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 // --- App Component ---
 
 export default function App() {
+  return (
+    <ErrorBoundary>
+      <LinguistApp />
+    </ErrorBoundary>
+  );
+}
+
+function LinguistApp() {
   const [inputText, setInputText] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [isHumanizing, setIsHumanizing] = useState(false);
@@ -54,8 +106,16 @@ export default function App() {
   const [humanizeResult, setHumanizeResult] = useState<HumanizeResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  const getAI = () => {
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is missing. Please set it in your environment variables.");
+    }
+    return new GoogleGenAI({ apiKey });
+  };
 
   const handleScan = async () => {
     if (!inputText.trim()) return;
@@ -65,6 +125,7 @@ export default function App() {
     setHumanizeResult(null);
 
     try {
+      const ai = getAI();
       const response = await ai.models.generateContent({
         model: GEMINI_MODEL,
         contents: [
@@ -116,6 +177,7 @@ export default function App() {
     setError(null);
 
     try {
+      const ai = getAI();
       const response = await ai.models.generateContent({
         model: GEMINI_MODEL,
         contents: [
@@ -170,11 +232,18 @@ export default function App() {
 
   const handlePaste = async () => {
     try {
+      // Check if the browser supports clipboard API
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        throw new Error("Clipboard API not supported or blocked by browser security (requires HTTPS).");
+      }
       const text = await navigator.clipboard.readText();
       setInputText(text);
+      setError(null);
     } catch (err) {
       console.error("Paste failed:", err);
-      setError("Failed to read from clipboard. Please paste manually.");
+      // Automatically focus the textarea so the user can just hit Ctrl+V
+      textareaRef.current?.focus();
+      setError("Clipboard access is blocked by browser security in this preview. The terminal is now focused—please use Ctrl+V (Windows) or Cmd+V (Mac) to paste manually.");
     }
   };
 
@@ -198,11 +267,16 @@ export default function App() {
           </div>
         </div>
         <div className="flex gap-4 items-center">
+          {!apiKey && (
+            <div className="px-3 py-1 bg-red-100 border border-red-500 text-red-700 text-[10px] font-mono uppercase animate-pulse">
+              API Key Missing
+            </div>
+          )}
           <div className="hidden md:flex flex-col items-end">
             <span className="text-[10px] uppercase tracking-widest opacity-50 font-mono">System Status</span>
             <span className="text-xs font-mono flex items-center gap-2">
-              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-              Operational
+              <span className={cn("w-2 h-2 rounded-full animate-pulse", apiKey ? "bg-green-500" : "bg-red-500")} />
+              {apiKey ? "Operational" : "Offline"}
             </span>
           </div>
         </div>
@@ -237,6 +311,7 @@ export default function App() {
             </div>
             <div className="p-4">
               <textarea
+                ref={textareaRef}
                 className="w-full h-[400px] bg-transparent border-none focus:ring-0 resize-none font-mono text-sm leading-relaxed placeholder:opacity-30"
                 placeholder="Paste content for analysis..."
                 value={inputText}
