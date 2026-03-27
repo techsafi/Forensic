@@ -1,1 +1,40 @@
 @import "tailwindcss";
+
+:root {
+  --bg: #F8F9FA;
+  --ink: #050505;
+  --surface: rgba(0, 0, 0, 0.03);
+  --border: rgba(0, 0, 0, 0.08);
+  --glass: rgba(255, 255, 255, 0.7);
+  --color-accent: #00B4D8; /* Slightly darker cyan for light mode */
+  --color-danger: #D00000;
+  --color-warning: #F59E0B;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #050505;
+    --ink: #FFFFFF;
+    --surface: rgba(255, 255, 255, 0.05);
+    --border: rgba(255, 255, 255, 0.1);
+    --glass: rgba(5, 5, 5, 0.8);
+    --color-accent: #00F0FF;
+    --color-danger: #FF4444;
+    --color-warning: #F59E0B;
+  }
+}
+
+@theme {
+  --color-accent: var(--color-accent);
+  --color-danger: var(--color-danger);
+  --color-warning: var(--color-warning);
+  --color-ink: var(--ink);
+  --color-surface: var(--surface);
+  --color-glass: var(--glass);
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}

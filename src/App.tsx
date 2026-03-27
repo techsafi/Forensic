@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { GoogleGenAI, Type } from "@google/genai";
 import { 
   Search, 
@@ -19,9 +19,13 @@ import {
   Cpu,
   Fingerprint,
   Trash2,
-  Clipboard
+  Clipboard,
+  Download,
+  History,
+  Info,
+  Scan
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence, useMotionValue, useTransform, animate } from "motion/react";
 import ReactMarkdown from "react-markdown";
 import { cn } from "./lib/utils";
 
@@ -33,6 +37,7 @@ interface ScanResult {
   keyFlags: string[];
   perplexityAnalysis: string;
   burstinessAnalysis: string;
+  scentDetection?: string[]; // AI-isms detected
 }
 
 interface HumanizeResult {
@@ -40,11 +45,50 @@ interface HumanizeResult {
   metricsApplied: string[];
 }
 
+interface ForensicSession {
+  id: string;
+  timestamp: number;
+  inputText: string;
+  scanResult: ScanResult;
+  humanizeResult: HumanizeResult;
+}
+
 // --- Constants ---
 
 const GEMINI_MODEL = "gemini-3-flash-preview";
 
 // --- Components ---
+
+const RollingNumber = ({ value, duration = 2 }: { value: number; duration?: number }) => {
+  const count = useMotionValue(0);
+  const rounded = useTransform(count, (latest) => Math.round(latest));
+
+  useEffect(() => {
+    const controls = animate(count, value, { duration, ease: "easeOut" });
+    return controls.stop;
+  }, [value, duration]);
+
+  return <motion.span>{rounded}</motion.span>;
+};
+
+const TypewriterText = ({ text, onComplete }: { text: string; onComplete?: () => void }) => {
+  const [displayedText, setDisplayedText] = useState("");
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  useEffect(() => {
+    if (currentIndex < text.length) {
+      const timeout = setTimeout(() => {
+        setDisplayedText((prev) => prev + text[currentIndex]);
+        setCurrentIndex((prev) => prev + 1);
+      }, Math.random() * 30 + 10); // Variable speed
+      return () => clearTimeout(timeout);
+    } else if (onComplete) {
+      onComplete();
+    }
+  }, [currentIndex, text, onComplete]);
+
+  return <ReactMarkdown>{displayedText}</ReactMarkdown>;
+};
 
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
   constructor(props: { children: React.ReactNode }) {
@@ -63,19 +107,19 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-[#E4E3E0] flex items-center justify-center p-6 text-center">
-          <div className="max-w-md p-8 bg-white border border-[#141414] shadow-[8px_8px_0px_0px_rgba(20,20,20,1)]">
-            <AlertCircle className="w-12 h-12 text-red-600 mx-auto mb-4" />
+        <div className="min-h-screen bg-[var(--bg)] flex items-center justify-center p-6 text-center text-[var(--ink)]">
+          <div className="max-w-md p-8 bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl shadow-2xl">
+            <AlertCircle className="w-12 h-12 text-danger mx-auto mb-4" />
             <h2 className="font-serif italic text-2xl mb-4">System Malfunction</h2>
             <p className="text-xs font-mono opacity-70 mb-6 leading-relaxed">
               An unexpected error has occurred. This could be due to a configuration mismatch or a runtime exception.
             </p>
-            <div className="bg-red-50 p-4 border border-red-200 text-[10px] font-mono text-red-700 text-left mb-6 overflow-auto max-h-32">
+            <div className="bg-danger/10 p-4 border border-danger/30 text-[10px] font-mono text-danger text-left mb-6 overflow-auto max-h-32 rounded-lg">
               {this.state.error?.message}
             </div>
             <button 
               onClick={() => window.location.reload()}
-              className="w-full py-3 bg-[#141414] text-[#E4E3E0] text-[11px] uppercase tracking-widest font-bold hover:bg-opacity-90 transition-all"
+              className="w-full py-4 bg-accent text-[#050505] text-[11px] uppercase tracking-widest font-bold rounded-xl hover:brightness-110 transition-all"
             >
               Restart System
             </button>
@@ -93,22 +137,46 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 export default function App() {
   return (
     <ErrorBoundary>
-      <LinguistApp />
+      <InvisifyApp />
     </ErrorBoundary>
   );
 }
 
-function LinguistApp() {
+function InvisifyApp() {
   const [inputText, setInputText] = useState("");
-  const [isScanning, setIsScanning] = useState(false);
-  const [isHumanizing, setIsHumanizing] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "probe" | "analysis" | "synthesis">("idle");
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [humanizeResult, setHumanizeResult] = useState<HumanizeResult | null>(null);
+  const [history, setHistory] = useState<ForensicSession[]>([]);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const apiKey = process.env.GEMINI_API_KEY;
+
+  useEffect(() => {
+    // Load history from localStorage
+    const savedHistory = localStorage.getItem("invisify_history");
+    if (savedHistory) {
+      setHistory(JSON.parse(savedHistory));
+    }
+
+    // PWA Install Prompt
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    });
+  }, []);
+
+  const saveToHistory = (session: ForensicSession) => {
+    const newHistory = [session, ...history].slice(0, 10);
+    setHistory(newHistory);
+    localStorage.setItem("invisify_history", JSON.stringify(newHistory));
+  };
 
   const getAI = () => {
     if (!apiKey) {
@@ -117,112 +185,120 @@ function LinguistApp() {
     return new GoogleGenAI({ apiKey });
   };
 
-  const handleScan = async () => {
+  const handleInvisify = async () => {
     if (!inputText.trim()) return;
-    setIsScanning(true);
+    setIsProcessing(true);
+    setPhase("probe");
     setError(null);
     setScanResult(null);
     setHumanizeResult(null);
 
     try {
       const ai = getAI();
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: `Analyze the following text for AI signatures (Perplexity, Burstiness, AI-specific vocabulary). 
-            Return the analysis in JSON format with the following schema:
-            {
-              "aiProbabilityScore": number (0-100),
-              "classification": "Likely AI" | "Hybrid" | "Likely Human",
-              "keyFlags": string[],
-              "perplexityAnalysis": string,
-              "burstinessAnalysis": string
+      
+      // Phase A: The Probe (Laser Scan)
+      const startTime = Date.now();
+      
+      // Start API calls in parallel
+      const [scanResponse, humanizeResponse] = await Promise.all([
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [{ role: "user", parts: [{ text: `You are a Forensic Linguistic Analyst. Perform a deep-scan of the provided text to identify 'Robotic Traces' (AI signatures). 
+Analyze:
+1. Perplexity (randomness of word choice).
+2. Burstiness (variation in sentence structure).
+3. Scent Detection: Identify specific 'AI-isms' like repetitive transitions, overly balanced clauses, or lack of idiomatic flow.
+Return JSON: { 
+  "aiProbabilityScore": number (0-100), 
+  "classification": "Likely AI" | "Hybrid" | "Likely Human", 
+  "keyFlags": string[], 
+  "perplexityAnalysis": string, 
+  "burstinessAnalysis": string, 
+  "scentDetection": string[] 
+}. 
+
+Text to analyze: ${inputText}` }] }],
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                aiProbabilityScore: { type: Type.NUMBER },
+                classification: { type: Type.STRING },
+                keyFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
+                perplexityAnalysis: { type: Type.STRING },
+                burstinessAnalysis: { type: Type.STRING },
+                scentDetection: { type: Type.ARRAY, items: { type: Type.STRING } }
+              },
+              required: ["aiProbabilityScore", "classification", "keyFlags", "perplexityAnalysis", "burstinessAnalysis", "scentDetection"]
             }
-            
-            Text to analyze:
-            ${inputText}` }]
           }
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              aiProbabilityScore: { type: Type.NUMBER },
-              classification: { type: Type.STRING, enum: ["Likely AI", "Hybrid", "Likely Human"] },
-              keyFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
-              perplexityAnalysis: { type: Type.STRING },
-              burstinessAnalysis: { type: Type.STRING }
-            },
-            required: ["aiProbabilityScore", "classification", "keyFlags", "perplexityAnalysis", "burstinessAnalysis"]
+        }),
+        ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [{ role: "user", parts: [{ text: `You are a Master Stylist. Your task is to 'Invisify' the provided text—erasing the robotic trace while maintaining 100% structural fidelity and meaning. 
+DO NOT turn it into a story or add unnecessary narrative flourishes. 
+Keep the original tone and intent, but inject human-like 'jitter' (natural linguistic variance). 
+Return JSON: { 
+  "rewrittenText": string, 
+  "metricsApplied": string[] 
+}. 
+
+Text to humanize: ${inputText}` }] }],
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                rewrittenText: { type: Type.STRING },
+                metricsApplied: { type: Type.ARRAY, items: { type: Type.STRING } }
+              },
+              required: ["rewrittenText", "metricsApplied"]
+            }
           }
-        }
+        })
+      ]);
+
+      const sResult = JSON.parse(scanResponse.text);
+      const hResult = JSON.parse(humanizeResponse.text);
+
+      // Ensure minimum scanning duration (2s)
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 2000) {
+        await new Promise(r => setTimeout(r, 2000 - elapsed));
+      }
+
+      // Transition to Phase B: Forensic Analysis
+      setPhase("analysis");
+      setScanResult(sResult);
+
+      // Wait a bit for the rolling number animation
+      await new Promise(r => setTimeout(r, 2500));
+
+      // Transition to Phase C: The Synthesis
+      setPhase("synthesis");
+      setHumanizeResult(hResult);
+
+      // Save to history
+      saveToHistory({
+        id: Date.now().toString(),
+        timestamp: Date.now(),
+        inputText,
+        scanResult: sResult,
+        humanizeResult: hResult
       });
 
-      const result = JSON.parse(response.text);
-      setScanResult(result);
+      // Show install prompt after first success
+      if (deferredPrompt && history.length === 0) {
+        setShowInstallPrompt(true);
+      }
+
     } catch (err: any) {
-      console.error("Scan failed:", err);
-      setError(`Scan failed: ${err.message || "An unexpected error occurred. Check your API key and network."}`);
+      console.error("Forensic process failed:", err);
+      setError(`Process failed: ${err.message || "An unexpected error occurred."}`);
+      setPhase("idle");
     } finally {
-      setIsScanning(false);
-    }
-  };
-
-  const handleHumanize = async () => {
-    if (!inputText.trim()) return;
-    setIsHumanizing(true);
-    setError(null);
-
-    try {
-      const ai = getAI();
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: `You are an Advanced Linguistic Forensic Analyst and Content Stylist. 
-            Humanize the following text while maintaining its original structural fidelity and professional intent. 
-            DO NOT turn the text into a story or narrative. Keep the format (lists, steps, paragraphs) identical to the input.
-            
-            Use these "Humanity Metrics" with precision:
-            1. STRUCTURAL FIDELITY: Maintain the exact format and structural intent of the input. If the input is a technical explanation or a list, it must remain so.
-            2. NATURAL PHRASING: Replace robotic, overly-optimized AI vocabulary with natural, conversational language that a professional human would use. (e.g., replace "utilize" with "use", "subsequently" with "then").
-            3. HUMAN NUANCE: Use subtle "Hedging Language" (e.g., "It seems to me," "I'd argue that") and varied sentence lengths to create a natural rhythm, avoiding the "perfect" symmetry of AI.
-            4. CONSTRUCTIVE FLOW: Ensure the text remains focused on the original information. Avoid unnecessary narrative fluff, anecdotal placeholders, or storytelling elements.
-            
-            Return the result in JSON format:
-            {
-              "rewrittenText": string,
-              "metricsApplied": string[]
-            }
-            
-            Text to humanize:
-            ${inputText}` }]
-          }
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              rewrittenText: { type: Type.STRING },
-              metricsApplied: { type: Type.ARRAY, items: { type: Type.STRING } }
-            },
-            required: ["rewrittenText", "metricsApplied"]
-          }
-        }
-      });
-
-      const result = JSON.parse(response.text);
-      setHumanizeResult(result);
-    } catch (err: any) {
-      console.error("Humanization failed:", err);
-      setError(`Humanization failed: ${err.message || "An unexpected error occurred. Check your API key and network."}`);
-    } finally {
-      setIsHumanizing(false);
+      setIsProcessing(false);
     }
   };
 
@@ -231,22 +307,20 @@ function LinguistApp() {
     setScanResult(null);
     setHumanizeResult(null);
     setError(null);
+    setPhase("idle");
   };
 
   const handlePaste = async () => {
     try {
-      // Check if the browser supports clipboard API
       if (!navigator.clipboard || !navigator.clipboard.readText) {
-        throw new Error("Clipboard API not supported or blocked by browser security (requires HTTPS).");
+        throw new Error("Clipboard API restricted.");
       }
       const text = await navigator.clipboard.readText();
       setInputText(text);
       setError(null);
     } catch (err) {
-      console.error("Paste failed:", err);
-      // Automatically focus the textarea so the user can just hit Ctrl+V
       textareaRef.current?.focus();
-      setError("Clipboard access is blocked by browser security in this preview. The terminal is now focused—please use Ctrl+V (Windows) or Cmd+V (Mac) to paste manually.");
+      setError("Clipboard access restricted. The terminal is focused—paste manually.");
     }
   };
 
@@ -258,274 +332,411 @@ function LinguistApp() {
     }
   };
 
+  const handleInstall = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') {
+        setDeferredPrompt(null);
+      }
+      setShowInstallPrompt(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0]">
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--ink)] font-sans selection:bg-accent selection:text-[var(--bg)] overflow-x-hidden pb-32">
+      {/* Cinematic Background */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+        <motion.div 
+          animate={{ 
+            scale: isProcessing ? [1, 1.1, 1] : 1,
+            opacity: isProcessing ? [0.05, 0.1, 0.05] : 0.05
+          }}
+          transition={{ duration: 4, repeat: Infinity }}
+          className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-accent blur-[120px] rounded-full" 
+        />
+        <motion.div 
+          animate={{ 
+            scale: isProcessing ? [1, 1.2, 1] : 1,
+            opacity: isProcessing ? [0.05, 0.08, 0.05] : 0.05
+          }}
+          transition={{ duration: 5, repeat: Infinity, delay: 1 }}
+          className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-accent blur-[120px] rounded-full" 
+        />
+        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 mix-blend-overlay" />
+        
+        {/* Scanning Grid Overlay */}
+        {isProcessing && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 0.1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 bg-[linear-gradient(var(--color-accent)_1px,transparent_1px),linear-gradient(90deg,var(--color-accent)_1px,transparent_1px)] bg-[size:40px_40px] opacity-[0.05]"
+          />
+        )}
+      </div>
+
       {/* Header */}
-      <header className="border-b border-[#141414] p-6 flex justify-between items-center bg-[#E4E3E0] sticky top-0 z-10">
+      <header className="p-6 flex justify-between items-center sticky top-0 z-50 backdrop-blur-md border-b border-[var(--border)] bg-[var(--glass)]">
         <div className="flex items-center gap-3">
-          <Fingerprint className="w-8 h-8" />
+          <div className="w-10 h-10 bg-accent rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(0,180,216,0.3)] dark:shadow-[0_0_20px_rgba(0,240,255,0.3)]">
+            <Fingerprint className="w-6 h-6 text-[#050505]" />
+          </div>
           <div>
-            <h1 className="font-serif italic text-2xl leading-none">Linguist Forensic</h1>
-            <p className="text-[10px] uppercase tracking-widest opacity-50 font-mono">Advanced Content Stylist v1.0</p>
+            <h1 className="font-bold text-xl tracking-tight uppercase">Invisify</h1>
+            <p className="text-[9px] uppercase tracking-[0.2em] text-accent font-mono">Robotic Trace Erasure</p>
           </div>
         </div>
-        <div className="flex gap-4 items-center">
-          {!apiKey && (
-            <div className="px-3 py-1 bg-red-100 border border-red-500 text-red-700 text-[10px] font-mono uppercase animate-pulse">
-              API Key Missing
-            </div>
-          )}
-          <div className="hidden md:flex flex-col items-end">
-            <span className="text-[10px] uppercase tracking-widest opacity-50 font-mono">System Status</span>
-            <span className="text-xs font-mono flex items-center gap-2">
-              <span className={cn("w-2 h-2 rounded-full animate-pulse", apiKey ? "bg-green-500" : "bg-red-500")} />
-              {apiKey ? "Operational" : "Offline"}
+        <div className="flex items-center gap-4">
+          <div className="hidden sm:flex flex-col items-end">
+            <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono">Forensic Link</span>
+            <span className="text-[10px] font-mono flex items-center gap-2">
+              <span className={cn("w-1.5 h-1.5 rounded-full animate-pulse", apiKey ? "bg-accent" : "bg-danger")} />
+              {apiKey ? "Secure" : "Offline"}
             </span>
           </div>
+          <button 
+            onClick={() => setShowHistory(true)}
+            className="p-2 hover:bg-surface rounded-full transition-colors"
+          >
+            <History className="w-5 h-5 opacity-40" />
+          </button>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Left Column: Input & Controls */}
-        <div className="lg:col-span-5 space-y-6">
-          <section className="bg-white border border-[#141414] rounded-sm overflow-hidden shadow-[4px_4px_0px_0px_rgba(20,20,20,1)]">
-            <div className="border-b border-[#141414] p-3 flex items-center justify-between bg-[#141414] text-[#E4E3E0]">
+      <main className="max-w-4xl mx-auto p-6 space-y-8 relative z-10">
+        {/* Input Terminal */}
+        <section className="relative group">
+          <div className="absolute -inset-0.5 bg-gradient-to-r from-accent/20 to-transparent rounded-2xl blur opacity-20 group-hover:opacity-40 transition duration-1000" />
+          <div className="relative bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl overflow-hidden">
+            <div className="p-4 border-b border-[var(--border)] flex items-center justify-between bg-surface">
               <div className="flex items-center gap-2">
-                <Terminal className="w-4 h-4" />
-                <span className="text-[11px] uppercase tracking-widest font-mono">Input Terminal</span>
+                <Terminal className="w-4 h-4 text-accent" />
+                <span className="text-[10px] uppercase tracking-widest font-mono opacity-60">Forensic Input</span>
               </div>
-              <div className="flex items-center gap-2">
-                <button 
-                  onClick={handlePaste}
-                  className="p-1 hover:bg-white/20 rounded transition-colors"
-                  title="Paste from clipboard"
-                >
-                  <Clipboard className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-3">
+                <button onClick={handlePaste} className="p-2 hover:bg-[var(--border)] rounded-lg transition-colors flex items-center gap-2" title="Paste">
+                  <Clipboard className="w-4 h-4 opacity-40" />
+                  <span className="text-[10px] font-mono opacity-40 hidden sm:inline uppercase">Paste</span>
                 </button>
-                <button 
-                  onClick={handleClear}
-                  className="p-1 hover:bg-white/20 rounded transition-colors"
-                  title="Clear terminal"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
+                <button onClick={handleClear} className="p-2 hover:bg-[var(--border)] rounded-lg transition-colors flex items-center gap-2" title="Clear">
+                  <Trash2 className="w-4 h-4 opacity-40" />
+                  <span className="text-[10px] font-mono opacity-40 hidden sm:inline uppercase">Clear</span>
                 </button>
-                <span className="text-[10px] opacity-50 font-mono ml-2">UTF-8</span>
               </div>
             </div>
-            <div className="p-4">
+            
+            <div className="relative">
               <textarea
                 ref={textareaRef}
-                className="w-full h-[400px] bg-transparent border-none focus:ring-0 resize-none font-mono text-sm leading-relaxed placeholder:opacity-30"
-                placeholder="Paste content for analysis..."
+                className="w-full h-[300px] sm:h-[400px] bg-transparent p-6 border-none focus:ring-0 resize-none font-mono text-sm leading-relaxed placeholder:opacity-20 text-[var(--ink)]/90"
+                placeholder="Initialize forensic scan..."
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
               />
-            </div>
-            <div className="border-t border-[#141414] p-4 flex gap-3 bg-[#f5f5f5]">
-              <button
-                onClick={handleScan}
-                disabled={isScanning || !inputText.trim()}
-                className={cn(
-                  "flex-1 py-3 px-4 border border-[#141414] text-[11px] uppercase tracking-widest font-bold transition-all flex items-center justify-center gap-2",
-                  isScanning ? "bg-gray-200 cursor-not-allowed" : "bg-white hover:bg-[#141414] hover:text-[#E4E3E0] active:translate-y-0.5"
-                )}
-              >
-                {isScanning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                Scan & Diagnose
-              </button>
-              <button
-                onClick={handleHumanize}
-                disabled={isHumanizing || !inputText.trim()}
-                className={cn(
-                  "flex-1 py-3 px-4 border border-[#141414] text-[11px] uppercase tracking-widest font-bold transition-all flex items-center justify-center gap-2",
-                  isHumanizing ? "bg-gray-200 cursor-not-allowed" : "bg-[#141414] text-[#E4E3E0] hover:bg-opacity-90 active:translate-y-0.5"
-                )}
-              >
-                {isHumanizing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                Humanize
-              </button>
-            </div>
-          </section>
 
+              {/* Paste Overlay for Empty State */}
+              {!inputText && !isProcessing && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <button 
+                    onClick={handlePaste}
+                    className="pointer-events-auto flex flex-col items-center gap-4 opacity-20 hover:opacity-40 transition-opacity"
+                  >
+                    <div className="w-16 h-16 border border-dashed border-white/40 rounded-full flex items-center justify-center">
+                      <Clipboard className="w-6 h-6" />
+                    </div>
+                    <span className="text-[10px] font-mono uppercase tracking-[0.3em]">Tap to Paste Forensic Data</span>
+                  </button>
+                </div>
+              )}
+              
+              {/* Scanner Animation Overlay */}
+              <AnimatePresence>
+                {isProcessing && (
+                  <>
+                    {/* Laser Scan Line */}
+                    <motion.div
+                      initial={{ top: 0 }}
+                      animate={{ top: "100%" }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                      className="absolute left-0 right-0 h-[2px] bg-accent shadow-[0_0_15px_var(--color-accent),0_0_30px_var(--color-accent)] z-20"
+                    />
+                    {/* Processing Overlay */}
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="absolute inset-0 bg-accent/5 z-10 flex items-center justify-center backdrop-blur-[2px]"
+                    >
+                      <div className="flex flex-col items-center gap-4">
+                        <div className="w-16 h-16 border-2 border-accent/20 border-t-accent rounded-full animate-spin" />
+                        <motion.span
+                          animate={{ opacity: [0.4, 1, 0.4] }}
+                          transition={{ duration: 1.5, repeat: Infinity }}
+                          className="text-[10px] font-mono uppercase tracking-[0.3em] text-accent text-center px-6"
+                        >
+                          {phase === "probe" && "Probing Linguistic DNA..."}
+                          {phase === "analysis" && "Forensic Analysis in Progress..."}
+                          {phase === "synthesis" && "Synthesizing Humanized Trace..."}
+                        </motion.span>
+                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        </section>
+
+        {/* Error Display */}
+        <AnimatePresence>
           {error && (
             <motion.div 
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="p-4 bg-red-50 border border-red-500 text-red-700 text-xs font-mono flex items-center gap-3"
+              exit={{ opacity: 0 }}
+              className="p-4 bg-danger/10 border border-danger/30 rounded-xl text-danger text-xs font-mono flex items-center gap-3"
             >
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
               {error}
             </motion.div>
           )}
-        </div>
+        </AnimatePresence>
 
-        {/* Right Column: Results */}
-        <div className="lg:col-span-7 space-y-8">
-          <AnimatePresence mode="wait">
-            {/* Stage 1: Diagnosis */}
-            {scanResult && (
-              <motion.section
-                key="scan-result"
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                className="space-y-6"
-              >
-                <div className="flex items-center gap-4">
-                  <div className="h-[1px] flex-1 bg-[#141414] opacity-20" />
-                  <h2 className="font-serif italic text-xl">Stage 1: Diagnosis</h2>
-                  <div className="h-[1px] flex-1 bg-[#141414] opacity-20" />
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="p-6 bg-white border border-[#141414] shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col items-center justify-center text-center">
-                    <span className="text-[10px] uppercase tracking-widest opacity-50 font-mono mb-2">AI Probability</span>
-                    <span className="text-4xl font-mono font-bold">{scanResult.aiProbabilityScore}%</span>
-                  </div>
-                  <div className="p-6 bg-white border border-[#141414] shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col items-center justify-center text-center">
-                    <span className="text-[10px] uppercase tracking-widest opacity-50 font-mono mb-2">Classification</span>
-                    <span className={cn(
-                      "text-lg font-bold uppercase tracking-tight",
-                      scanResult.classification === "Likely AI" ? "text-red-600" : 
-                      scanResult.classification === "Hybrid" ? "text-orange-600" : "text-green-600"
-                    )}>
-                      {scanResult.classification}
-                    </span>
-                  </div>
-                  <div className="p-6 bg-white border border-[#141414] shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col items-center justify-center text-center">
-                    <span className="text-[10px] uppercase tracking-widest opacity-50 font-mono mb-2">Flags Detected</span>
-                    <span className="text-4xl font-mono font-bold">{scanResult.keyFlags.length}</span>
+        {/* Results Pipeline */}
+        <AnimatePresence mode="wait">
+          {/* Phase B: Forensic Analysis */}
+          {scanResult && (
+            <motion.div
+              key="analysis"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-6"
+            >
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div className="p-6 bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl flex flex-col items-center justify-center text-center">
+                  <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono mb-2">Humanity</span>
+                  <div className="text-3xl font-mono font-bold text-accent flex items-baseline">
+                    <RollingNumber value={100 - scanResult.aiProbabilityScore} />
+                    <span className="text-sm ml-1 opacity-50">%</span>
                   </div>
                 </div>
-
-                <div className="bg-white border border-[#141414] p-6 space-y-6">
-                  <div>
-                    <h3 className="text-[11px] uppercase tracking-widest font-bold font-mono mb-3 flex items-center gap-2">
-                      <Cpu className="w-3 h-3" /> Key Flags & Patterns
-                    </h3>
-                    <div className="flex flex-wrap gap-2">
-                      {scanResult.keyFlags.map((flag, i) => (
-                        <span key={i} className="px-2 py-1 bg-[#141414] text-[#E4E3E0] text-[10px] font-mono uppercase">
-                          {flag}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div>
-                      <h4 className="font-serif italic text-sm mb-2">Perplexity Analysis</h4>
-                      <p className="text-xs leading-relaxed opacity-70">{scanResult.perplexityAnalysis}</p>
-                    </div>
-                    <div>
-                      <h4 className="font-serif italic text-sm mb-2">Burstiness Analysis</h4>
-                      <p className="text-xs leading-relaxed opacity-70">{scanResult.burstinessAnalysis}</p>
-                    </div>
+                <div className="p-6 bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl flex flex-col items-center justify-center text-center">
+                  <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono mb-2">AI Index</span>
+                  <div className="text-3xl font-mono font-bold text-danger flex items-baseline">
+                    <RollingNumber value={scanResult.aiProbabilityScore} />
+                    <span className="text-sm ml-1 opacity-50">%</span>
                   </div>
                 </div>
-              </motion.section>
-            )}
-
-            {/* Stage 2: Humanization */}
-            {humanizeResult && (
-              <motion.section
-                key="humanize-result"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="space-y-6"
-              >
-                <div className="flex items-center gap-4">
-                  <div className="h-[1px] flex-1 bg-[#141414] opacity-20" />
-                  <h2 className="font-serif italic text-xl">Stage 2: Humanization</h2>
-                  <div className="h-[1px] flex-1 bg-[#141414] opacity-20" />
+                <div className="p-6 bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl flex flex-col items-center justify-center text-center">
+                  <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono mb-2">Origin</span>
+                  <span className={cn(
+                    "text-sm font-bold uppercase tracking-tight",
+                    scanResult.classification === "Likely AI" ? "text-danger" : 
+                    scanResult.classification === "Hybrid" ? "text-warning" : "text-accent"
+                  )}>
+                    {scanResult.classification}
+                  </span>
                 </div>
+                <div className="p-6 bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl flex flex-col items-center justify-center text-center">
+                  <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono mb-2">Scents</span>
+                  <span className="text-3xl font-mono font-bold">{scanResult.scentDetection?.length || 0}</span>
+                </div>
+              </div>
 
-                <div className="bg-[#151619] text-white rounded-lg overflow-hidden shadow-2xl border border-white/10">
-                  <div className="p-4 border-b border-white/10 flex items-center justify-between bg-white/5">
-                    <div className="flex items-center gap-2">
-                      <ShieldCheck className="w-4 h-4 text-green-400" />
-                      <span className="text-[10px] uppercase tracking-widest font-mono">Stylized Output</span>
-                    </div>
-                    <button 
-                      onClick={copyToClipboard}
-                      className="p-2 hover:bg-white/10 rounded-md transition-colors"
-                    >
-                      {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4 opacity-50" />}
-                    </button>
-                  </div>
-                  <div className="p-8">
-                    <div className="prose prose-invert prose-sm max-w-none font-serif leading-relaxed text-gray-300">
-                      <ReactMarkdown>{humanizeResult.rewrittenText}</ReactMarkdown>
-                    </div>
-                  </div>
-                  <div className="p-4 border-t border-white/10 bg-black/20 flex flex-wrap gap-4">
-                    {humanizeResult.metricsApplied.map((metric, i) => (
-                      <div key={i} className="flex items-center gap-2">
-                        <div className="w-1.5 h-1.5 rounded-full bg-orange-500" />
-                        <span className="text-[9px] uppercase tracking-widest font-mono opacity-60">{metric}</span>
-                      </div>
+              {/* Scent Detection Details */}
+              {scanResult.scentDetection && scanResult.scentDetection.length > 0 && (
+                <div className="bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl p-6">
+                  <h3 className="text-[10px] uppercase tracking-widest font-bold font-mono text-accent mb-4 flex items-center gap-2">
+                    <Scan className="w-3 h-3" /> AI-isms Detected (Scents)
+                  </h3>
+                  <div className="flex flex-wrap gap-2">
+                    {scanResult.scentDetection.map((scent, i) => (
+                      <span key={i} className="px-3 py-1.5 bg-surface border border-[var(--border)] rounded-full text-[10px] font-mono text-[var(--ink)]/70">
+                        {scent}
+                      </span>
                     ))}
                   </div>
                 </div>
+              )}
+            </motion.div>
+          )}
 
-                <div className="flex justify-center">
-                  <div className="px-6 py-3 border border-dashed border-[#141414] rounded-full flex items-center gap-3">
-                    <User className="w-4 h-4" />
-                    <span className="text-[10px] uppercase tracking-widest font-bold">Verification Passed: Humanity Detected</span>
+          {/* Phase C: The Synthesis */}
+          {humanizeResult && (
+            <motion.div
+              key="synthesis"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-6"
+            >
+              <div className="bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl overflow-hidden">
+                <div className="p-4 border-b border-[var(--border)] flex items-center justify-between bg-surface">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-accent" />
+                    <span className="text-[10px] uppercase tracking-widest font-mono opacity-60">Invisified Output</span>
+                  </div>
+                  <button onClick={copyToClipboard} className="p-2 hover:bg-[var(--border)] rounded-lg transition-colors">
+                    {copied ? <Check className="w-4 h-4 text-accent" /> : <Copy className="w-4 h-4 opacity-40" />}
+                  </button>
+                </div>
+                <div className="p-8">
+                  <div className="prose prose-invert prose-sm max-w-none font-serif leading-relaxed text-[var(--ink)]/80">
+                    <TypewriterText text={humanizeResult.rewrittenText} />
                   </div>
                 </div>
-              </motion.section>
-            )}
-
-            {/* Empty State */}
-            {!scanResult && !humanizeResult && !isScanning && !isHumanizing && (
-              <div className="h-full flex flex-col items-center justify-center opacity-20 text-center py-20">
-                <Fingerprint className="w-24 h-24 mb-4" />
-                <p className="font-serif italic text-xl">Awaiting Data Input</p>
-                <p className="text-[10px] uppercase tracking-widest font-mono">System Idle / Ready for Scan</p>
-              </div>
-            )}
-
-            {/* Loading State */}
-            {(isScanning || isHumanizing) && (
-              <div className="h-full flex flex-col items-center justify-center py-20">
-                <div className="relative">
-                  <div className="w-24 h-24 border-2 border-[#141414] border-t-transparent rounded-full animate-spin" />
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <Cpu className="w-8 h-8 animate-pulse" />
-                  </div>
-                </div>
-                <p className="mt-8 font-serif italic text-xl">
-                  {isScanning ? "Analyzing Signatures..." : "Applying Humanity Metrics..."}
-                </p>
-                <div className="mt-4 flex gap-1">
-                  {[0, 1, 2].map((i) => (
-                    <motion.div
-                      key={i}
-                      animate={{ scale: [1, 1.5, 1] }}
-                      transition={{ repeat: Infinity, delay: i * 0.2 }}
-                      className="w-1.5 h-1.5 bg-[#141414] rounded-full"
-                    />
+                <div className="p-4 border-t border-[var(--border)] bg-black/5 flex flex-wrap gap-4">
+                  {humanizeResult.metricsApplied.map((metric, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <div className="w-1 h-1 rounded-full bg-accent" />
+                      <span className="text-[8px] uppercase tracking-widest font-mono opacity-40">{metric}</span>
+                    </div>
                   ))}
                 </div>
               </div>
-            )}
-          </AnimatePresence>
-        </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
 
-      {/* Footer */}
-      <footer className="mt-20 border-t border-[#141414] p-8 text-center">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
-          <p className="text-[10px] uppercase tracking-widest opacity-50 font-mono">
-            © 2026 Linguistic Forensic Lab / Secure Content Styling
-          </p>
-          <div className="flex gap-6">
-            <span className="text-[10px] uppercase tracking-widest font-bold font-mono">Privacy Protocol: Active</span>
-            <span className="text-[10px] uppercase tracking-widest font-bold font-mono">Encryption: AES-256</span>
+      {/* Thumb-Zone UI (Bottom Actions) */}
+      <div className="fixed bottom-0 left-0 right-0 p-6 z-50 pointer-events-none">
+        <div className="max-w-md mx-auto pointer-events-auto">
+          <div className="bg-glass backdrop-blur-2xl border border-[var(--border)] rounded-3xl p-3 shadow-2xl flex gap-3">
+            {humanizeResult && (
+              <button
+                onClick={copyToClipboard}
+                className="flex-1 py-4 rounded-2xl bg-surface border border-[var(--border)] text-[11px] uppercase tracking-widest font-bold hover:bg-[var(--border)] transition-all flex items-center justify-center active:scale-95"
+              >
+                {copied ? <Check className="w-4 h-4 text-accent" /> : <Copy className="w-4 h-4" />}
+              </button>
+            )}
+            <button
+              onClick={handleInvisify}
+              disabled={isProcessing || !inputText.trim()}
+              className={cn(
+                "flex-[2] py-4 rounded-2xl text-[11px] uppercase tracking-widest font-bold transition-all flex items-center justify-center gap-3 relative overflow-hidden group",
+                isProcessing ? "bg-surface cursor-not-allowed" : "bg-accent text-[#050505] active:scale-95"
+              )}
+            >
+              {isProcessing ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <>
+                  <Zap className="w-4 h-4" />
+                  <span>Invisify</span>
+                </>
+              )}
+              {!isProcessing && (
+                <div className="absolute inset-0 bg-white/20 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-500" />
+              )}
+            </button>
+            <button
+              onClick={handleClear}
+              className="flex-1 py-4 rounded-2xl bg-surface border border-[var(--border)] text-[11px] uppercase tracking-widest font-bold hover:bg-[var(--border)] transition-all flex items-center justify-center active:scale-95"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
           </div>
         </div>
-      </footer>
+      </div>
+
+      {/* History Drawer */}
+      <AnimatePresence>
+        {showHistory && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowHistory(false)}
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[70]"
+            />
+            <motion.div
+              initial={{ x: "100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "100%" }}
+              transition={{ type: "spring", damping: 25, stiffness: 200 }}
+              className="fixed top-0 right-0 bottom-0 w-full max-w-sm bg-[var(--bg)] border-l border-[var(--border)] z-[80] p-6 overflow-y-auto"
+            >
+              <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-2">
+                  <History className="w-5 h-5 text-accent" />
+                  <h2 className="font-bold text-lg uppercase tracking-tight">Forensic Archive</h2>
+                </div>
+                <button onClick={() => setShowHistory(false)} className="p-2 hover:bg-surface rounded-full">
+                  <ChevronRight className="w-5 h-5" />
+                </button>
+              </div>
+
+              {history.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-[60vh] opacity-20 text-center">
+                  <Search className="w-12 h-12 mb-4" />
+                  <p className="text-xs font-mono uppercase tracking-widest">Archive Empty</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {history.map((session) => (
+                    <button
+                      key={session.id}
+                      onClick={() => {
+                        setInputText(session.inputText);
+                        setScanResult(session.scanResult);
+                        setHumanizeResult(session.humanizeResult);
+                        setShowHistory(false);
+                        setPhase("synthesis");
+                      }}
+                      className="w-full p-4 bg-surface border border-[var(--border)] rounded-xl text-left hover:bg-[var(--border)] transition-all group"
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-[9px] font-mono opacity-40 uppercase">
+                          {new Date(session.timestamp).toLocaleString()}
+                        </span>
+                        <span className={cn(
+                          "text-[8px] font-mono px-1.5 py-0.5 rounded border",
+                          session.scanResult.classification === "Likely AI" ? "border-danger/30 text-danger" : "border-accent/30 text-accent"
+                        )}>
+                          {session.scanResult.aiProbabilityScore}% AI
+                        </span>
+                      </div>
+                      <p className="text-[11px] line-clamp-2 opacity-70 group-hover:opacity-100 transition-opacity">
+                        {session.inputText}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Install Prompt */}
+      <AnimatePresence>
+        {showInstallPrompt && (
+          <motion.div
+            initial={{ opacity: 0, y: 100 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 100 }}
+            className="fixed bottom-28 left-6 right-6 z-[60] max-w-md mx-auto"
+          >
+            <div className="bg-accent text-[#050505] p-6 rounded-2xl shadow-2xl flex items-center justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <Download className="w-6 h-6" />
+                <div>
+                  <h4 className="font-bold text-sm uppercase">Install Invisify</h4>
+                  <p className="text-[10px] opacity-70">Add to home screen for offline access.</p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => setShowInstallPrompt(false)} className="px-3 py-2 text-[10px] uppercase font-bold opacity-50">Later</button>
+                <button onClick={handleInstall} className="px-4 py-2 bg-[var(--bg)] text-accent rounded-lg text-[10px] uppercase font-bold">Install</button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

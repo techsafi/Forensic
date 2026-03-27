@@ -1,0 +1,21 @@
+{
+  "name": "Invisify",
+  "short_name": "Invisify",
+  "description": "The Erasure of the Robotic Trace.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050505",
+  "theme_color": "#00F0FF",
+  "icons": [
+    {
+      "src": "https://picsum.photos/seed/invisify/192/192",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://picsum.photos/seed/invisify/512/512",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
