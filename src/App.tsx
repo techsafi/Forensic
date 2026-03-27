@@ -184,11 +184,14 @@ function LinguistApp() {
           {
             role: "user",
             parts: [{ text: `You are an Advanced Linguistic Forensic Analyst and Content Stylist. 
-            Humanize the following text while maintaining constructive flow and logical depth. Use these "Humanity Metrics" with precision:
-            1. RHYTHMIC VARIATION: Use a dynamic mix of sentence lengths. Short sentences or "Bridge Fragments" (e.g., "Here's the thing.", "But wait.") should be used sparingly to emphasize points or pivot ideas, not just as filler.
-            2. CONSTRUCTIVE SUBSTANCE: Ensure the "Long" sentences are rich in detail, carry the main argument forward, and maintain high readability.
-            3. SEMANTIC SHIFTING: Replace overly formal "AI-speak" with natural, colloquial phrasing. Use "Hedging Language" (e.g., "I'm inclined to think," "It feels like") to show human nuance and uncertainty.
-            4. ANECDOTAL INJECTION: Integrate placeholders for personal perspective (e.g., "[In my experience...]") where it adds value to the narrative flow.
+            Humanize the following text while maintaining its original structural fidelity and professional intent. 
+            DO NOT turn the text into a story or narrative. Keep the format (lists, steps, paragraphs) identical to the input.
+            
+            Use these "Humanity Metrics" with precision:
+            1. STRUCTURAL FIDELITY: Maintain the exact format and structural intent of the input. If the input is a technical explanation or a list, it must remain so.
+            2. NATURAL PHRASING: Replace robotic, overly-optimized AI vocabulary with natural, conversational language that a professional human would use. (e.g., replace "utilize" with "use", "subsequently" with "then").
+            3. HUMAN NUANCE: Use subtle "Hedging Language" (e.g., "It seems to me," "I'd argue that") and varied sentence lengths to create a natural rhythm, avoiding the "perfect" symmetry of AI.
+            4. CONSTRUCTIVE FLOW: Ensure the text remains focused on the original information. Avoid unnecessary narrative fluff, anecdotal placeholders, or storytelling elements.
             
             Return the result in JSON format:
             {
