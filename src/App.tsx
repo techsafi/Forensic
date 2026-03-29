@@ -49,7 +49,7 @@ interface ForensicSession {
   id: string;
   timestamp: number;
   inputText: string;
-  scanResult: ScanResult;
+  scanResult?: ScanResult;
   humanizeResult: HumanizeResult;
 }
 
@@ -144,10 +144,12 @@ export default function App() {
 
 function InvisifyApp() {
   const [inputText, setInputText] = useState("");
+  const [scannedText, setScannedText] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [phase, setPhase] = useState<"idle" | "probe" | "analysis" | "synthesis">("idle");
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [humanizeResult, setHumanizeResult] = useState<HumanizeResult | null>(null);
+  const [isOrganizeEnabled, setIsOrganizeEnabled] = useState(false);
   const [history, setHistory] = useState<ForensicSession[]>([]);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -155,8 +157,25 @@ function InvisifyApp() {
   const [showInstallPrompt, setShowInstallPrompt] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const apiKey = process.env.GEMINI_API_KEY;
+
+  // Reset results if input changes after a scan
+  useEffect(() => {
+    if (!isProcessing && (scanResult || humanizeResult) && inputText !== scannedText) {
+      setScanResult(null);
+      setHumanizeResult(null);
+      setPhase("idle");
+    }
+  }, [inputText, scannedText, isProcessing]);
+
+  // Safety net: stop processing if input is cleared manually or via keyboard
+  useEffect(() => {
+    if (isProcessing && !inputText.trim()) {
+      handleClear();
+    }
+  }, [inputText, isProcessing]);
 
   useEffect(() => {
     // Load history from localStorage
@@ -166,10 +185,16 @@ function InvisifyApp() {
     }
 
     // PWA Install Prompt
-    window.addEventListener('beforeinstallprompt', (e) => {
+    const handleBeforeInstallPrompt = (e: any) => {
       e.preventDefault();
       setDeferredPrompt(e);
-    });
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      abortControllerRef.current?.abort();
+    };
   }, []);
 
   const saveToHistory = (session: ForensicSession) => {
@@ -185,8 +210,15 @@ function InvisifyApp() {
     return new GoogleGenAI({ apiKey });
   };
 
-  const handleInvisify = async () => {
+  const handleScan = async () => {
     if (!inputText.trim()) return;
+    
+    // Abort any previous process
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const { signal } = controller;
+
     setIsProcessing(true);
     setPhase("probe");
     setError(null);
@@ -199,15 +231,18 @@ function InvisifyApp() {
       // Phase A: The Probe (Laser Scan)
       const startTime = Date.now();
       
-      // Start API calls in parallel
-      const [scanResponse, humanizeResponse] = await Promise.all([
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: [{ role: "user", parts: [{ text: `You are a Forensic Linguistic Analyst. Perform a deep-scan of the provided text to identify 'Robotic Traces' (AI signatures). 
+      const scanResponse = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [{ role: "user", parts: [{ text: `You are a Forensic Linguistic Analyst. Perform a deep-scan of the provided text to identify 'Robotic Traces' (AI signatures). 
+
+CRITICAL: Distinguish between 'high-quality human writing' and 'AI-generated uniformity'. 
+
 Analyze:
-1. Perplexity (randomness of word choice).
-2. Burstiness (variation in sentence structure).
-3. Scent Detection: Identify specific 'AI-isms' like repetitive transitions, overly balanced clauses, or lack of idiomatic flow.
+1. PERPLEXITY (Word Choice Variance): Does the text use statistically predictable word patterns? AI tends to choose the most likely next word, leading to low perplexity.
+2. BURSTINESS (Sentence Rhythm): Does the text have a uniform sentence length and structure? AI often produces 'balanced' sentences of similar length. Human writing is 'bursty'—mixing short, punchy sentences with longer, complex ones.
+3. SCENT DETECTION (AI-isms): Look for repetitive transitions ('Furthermore', 'Moreover'), overly polite or neutral tone, and a lack of idiomatic or colloquial flow.
+4. STRUCTURAL SYMMETRY: AI often creates perfectly symmetrical paragraphs. Humans are more irregular.
+
 Return JSON: { 
   "aiProbabilityScore": number (0-100), 
   "classification": "Likely AI" | "Hybrid" | "Likely Human", 
@@ -218,49 +253,26 @@ Return JSON: {
 }. 
 
 Text to analyze: ${inputText}` }] }],
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                aiProbabilityScore: { type: Type.NUMBER },
-                classification: { type: Type.STRING },
-                keyFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                perplexityAnalysis: { type: Type.STRING },
-                burstinessAnalysis: { type: Type.STRING },
-                scentDetection: { type: Type.ARRAY, items: { type: Type.STRING } }
-              },
-              required: ["aiProbabilityScore", "classification", "keyFlags", "perplexityAnalysis", "burstinessAnalysis", "scentDetection"]
-            }
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              aiProbabilityScore: { type: Type.NUMBER },
+              classification: { type: Type.STRING },
+              keyFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
+              perplexityAnalysis: { type: Type.STRING },
+              burstinessAnalysis: { type: Type.STRING },
+              scentDetection: { type: Type.ARRAY, items: { type: Type.STRING } }
+            },
+            required: ["aiProbabilityScore", "classification", "keyFlags", "perplexityAnalysis", "burstinessAnalysis", "scentDetection"]
           }
-        }),
-        ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: [{ role: "user", parts: [{ text: `You are a Master Stylist. Your task is to 'Invisify' the provided text—erasing the robotic trace while maintaining 100% structural fidelity and meaning. 
-DO NOT turn it into a story or add unnecessary narrative flourishes. 
-Keep the original tone and intent, but inject human-like 'jitter' (natural linguistic variance). 
-Return JSON: { 
-  "rewrittenText": string, 
-  "metricsApplied": string[] 
-}. 
+        }
+      });
 
-Text to humanize: ${inputText}` }] }],
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                rewrittenText: { type: Type.STRING },
-                metricsApplied: { type: Type.ARRAY, items: { type: Type.STRING } }
-              },
-              required: ["rewrittenText", "metricsApplied"]
-            }
-          }
-        })
-      ]);
+      if (signal.aborted) return;
 
       const sResult = JSON.parse(scanResponse.text);
-      const hResult = JSON.parse(humanizeResponse.text);
 
       // Ensure minimum scanning duration (2s)
       const elapsed = Date.now() - startTime;
@@ -268,15 +280,94 @@ Text to humanize: ${inputText}` }] }],
         await new Promise(r => setTimeout(r, 2000 - elapsed));
       }
 
+      if (signal.aborted) return;
+
       // Transition to Phase B: Forensic Analysis
       setPhase("analysis");
       setScanResult(sResult);
+      setScannedText(inputText);
 
       // Wait a bit for the rolling number animation
       await new Promise(r => setTimeout(r, 2500));
 
-      // Transition to Phase C: The Synthesis
-      setPhase("synthesis");
+    } catch (err: any) {
+      if (signal.aborted) return;
+      console.error("Forensic scan failed:", err);
+      setError(`Scan failed: ${err.message || "An unexpected error occurred."}`);
+      setPhase("idle");
+    } finally {
+      if (abortControllerRef.current === controller || abortControllerRef.current === null) {
+        setIsProcessing(false);
+      }
+    }
+  };
+
+  const handleHumanize = async () => {
+    if (!inputText.trim() || !scanResult) return;
+
+    // Abort any previous process
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const { signal } = controller;
+
+    setIsProcessing(true);
+    setPhase("synthesis");
+    setError(null);
+    setHumanizeResult(null);
+
+    try {
+      const ai = getAI();
+      
+      const humanizeResponse = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [{ role: "user", parts: [{ text: `You are a Master Stylist and Forensic Eraser. Your task is to 'Invisify' the provided text—completely erasing the robotic trace while maintaining 100% structural fidelity and meaning.
+
+CRITICAL OBJECTIVE: The output must bypass a deep forensic linguistic scan. 
+
+STRATEGIES FOR ERASURE:
+1. MAXIMIZE BURSTINESS: Deliberately vary sentence length and structure. Mix short, punchy sentences with longer, more complex ones. Avoid the 'robotic rhythm' of medium-length, perfectly balanced sentences.
+2. INCREASE PERPLEXITY: Use more diverse and less predictable vocabulary. Avoid the most 'statistically likely' word choices that AI models prefer.
+3. ELIMINATE AI-ISMS: Remove common AI transition words (e.g., 'Furthermore', 'Moreover', 'In conclusion', 'Additionally', 'It is important to note'). Replace them with more natural, conversational, or varied transitions.
+4. HUMAN RHYTHM: Introduce subtle human-like 'jitter'. This includes starting some sentences with 'And' or 'But' where natural, using contractions consistently, and varying the tempo of the prose.
+5. NO FLUFF: Do not turn it into a story or add unnecessary narrative flourishes. Keep the original tone and intent.
+6. PRESERVE JITTER: If the input text already shows signs of human-like jitter (burstiness, varied sentence lengths), DO NOT smooth it out. Instead, enhance the natural flow while maintaining the 'invisified' state.
+
+${isOrganizeEnabled ? `
+INTELLIGENT FORMATTING (ORGANIZE) ENABLED:
+- Use Markdown to intelligently format the output for maximum readability.
+- Apply semantic headings (h1, h2, h3) to structure the content logically.
+- Use **bold** ONLY for semantic headings (h1, h2, h3) and sub-headings.
+- DO NOT use bold inside paragraphs, list items, or any other body text.
+- Use Roman numerals (I, II, III), numbers (1, 2, 3), or bullet points for lists where appropriate.
+- Use _italics_ for subtle emphasis, specialized terminology, or citations.
+- The formatting must feel natural and enhance the document's professional flow.
+` : ''}
+Return JSON: { 
+  "rewrittenText": string, 
+  "metricsApplied": string[] 
+}. 
+
+Text to humanize: ${inputText}` }] }],
+        config: {
+          temperature: 1.2,
+          topP: 0.95,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              rewrittenText: { type: Type.STRING },
+              metricsApplied: { type: Type.ARRAY, items: { type: Type.STRING } }
+            },
+            required: ["rewrittenText", "metricsApplied"]
+          }
+        }
+      });
+
+      if (signal.aborted) return;
+
+      const hResult = JSON.parse(humanizeResponse.text);
+
       setHumanizeResult(hResult);
 
       // Save to history
@@ -284,7 +375,7 @@ Text to humanize: ${inputText}` }] }],
         id: Date.now().toString(),
         timestamp: Date.now(),
         inputText,
-        scanResult: sResult,
+        scanResult: scanResult,
         humanizeResult: hResult
       });
 
@@ -294,23 +385,106 @@ Text to humanize: ${inputText}` }] }],
       }
 
     } catch (err: any) {
-      console.error("Forensic process failed:", err);
-      setError(`Process failed: ${err.message || "An unexpected error occurred."}`);
+      if (signal.aborted) return;
+      console.error("Humanization failed:", err);
+      setError(`Humanization failed: ${err.message || "An unexpected error occurred."}`);
+      setPhase("analysis");
+    } finally {
+      if (abortControllerRef.current === controller || abortControllerRef.current === null) {
+        setIsProcessing(false);
+      }
+    }
+  };
+
+  const handleJustOrganize = async () => {
+    if (!inputText.trim()) return;
+
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const { signal } = controller;
+
+    setIsProcessing(true);
+    setPhase("synthesis");
+    setError(null);
+    setHumanizeResult(null);
+    setScanResult(null);
+
+    try {
+      const ai = getAI();
+      
+      const organizeResponse = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [{ role: "user", parts: [{ text: `You are a Master Document Architect. Your task is to intelligently format and organize the provided text for maximum readability and professional flow.
+DO NOT rewrite the content to 'humanize' it or change the wording significantly. Focus ONLY on structure and formatting.
+- Use Markdown to intelligently format the output.
+- Apply semantic headings (h1, h2, h3) to structure the content logically.
+- Use **bold** ONLY for semantic headings (h1, h2, h3) and sub-headings.
+- DO NOT apply bold inside paragraphs, list items, or any other body text.
+- Use Roman numerals (I, II, III), numbers (1, 2, 3), or bullet points for lists where appropriate.
+- Use _italics_ for specialized terminology or citations if necessary.
+- The formatting must feel natural and enhance the document's professional flow.
+
+Return JSON: { 
+  "rewrittenText": string, 
+  "metricsApplied": string[] 
+}. 
+
+Text to organize: ${inputText}` }] }],
+        config: {
+          temperature: 1.1,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              rewrittenText: { type: Type.STRING },
+              metricsApplied: { type: Type.ARRAY, items: { type: Type.STRING } }
+            },
+            required: ["rewrittenText", "metricsApplied"]
+          }
+        }
+      });
+
+      if (signal.aborted) return;
+
+      const hResult = JSON.parse(organizeResponse.text);
+      setHumanizeResult(hResult);
+
+      saveToHistory({
+        id: Date.now().toString(),
+        timestamp: Date.now(),
+        inputText,
+        humanizeResult: hResult
+      });
+
+    } catch (err: any) {
+      if (signal.aborted) return;
+      console.error("Organization failed:", err);
+      setError(`Organization failed: ${err.message || "An unexpected error occurred."}`);
       setPhase("idle");
     } finally {
-      setIsProcessing(false);
+      if (abortControllerRef.current === controller || abortControllerRef.current === null) {
+        setIsProcessing(false);
+      }
     }
   };
 
   const handleClear = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
     setInputText("");
+    setScannedText("");
     setScanResult(null);
     setHumanizeResult(null);
     setError(null);
     setPhase("idle");
+    setIsProcessing(false);
   };
 
   const handlePaste = async () => {
+    handleClear();
     try {
       if (!navigator.clipboard || !navigator.clipboard.readText) {
         throw new Error("Clipboard API restricted.");
@@ -453,22 +627,22 @@ Text to humanize: ${inputText}` }] }],
               {/* Scanner Animation Overlay */}
               <AnimatePresence>
                 {isProcessing && (
-                  <>
+                  <motion.div 
+                    key="scanner-container"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="absolute inset-0 z-30"
+                  >
                     {/* Laser Scan Line */}
                     <motion.div
                       initial={{ top: 0 }}
                       animate={{ top: "100%" }}
-                      exit={{ opacity: 0 }}
                       transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
                       className="absolute left-0 right-0 h-[2px] bg-accent shadow-[0_0_15px_var(--color-accent),0_0_30px_var(--color-accent)] z-20"
                     />
                     {/* Processing Overlay */}
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      className="absolute inset-0 bg-accent/5 z-10 flex items-center justify-center backdrop-blur-[2px]"
-                    >
+                    <div className="absolute inset-0 bg-accent/5 flex items-center justify-center backdrop-blur-[2px]">
                       <div className="flex flex-col items-center gap-4">
                         <div className="w-16 h-16 border-2 border-accent/20 border-t-accent rounded-full animate-spin" />
                         <motion.span
@@ -481,8 +655,8 @@ Text to humanize: ${inputText}` }] }],
                           {phase === "synthesis" && "Synthesizing Humanized Trace..."}
                         </motion.span>
                       </div>
-                    </motion.div>
-                  </>
+                    </div>
+                  </motion.div>
                 )}
               </AnimatePresence>
             </div>
@@ -505,7 +679,7 @@ Text to humanize: ${inputText}` }] }],
         </AnimatePresence>
 
         {/* Results Pipeline */}
-        <AnimatePresence mode="wait">
+        <AnimatePresence>
           {/* Phase B: Forensic Analysis */}
           {scanResult && (
             <motion.div
@@ -560,6 +734,48 @@ Text to humanize: ${inputText}` }] }],
                   </div>
                 </div>
               )}
+
+              {/* Proceed to Humanize Action */}
+              {!humanizeResult && !isProcessing && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-4 bg-surface border border-[var(--border)] rounded-2xl">
+                    <div className="flex items-center gap-3">
+                      <div className={cn(
+                        "p-2 rounded-lg transition-colors",
+                        isOrganizeEnabled ? "bg-accent/20 text-accent" : "bg-white/5 text-white/20"
+                      )}>
+                        <Terminal className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-[10px] font-bold uppercase tracking-widest">Organize Output</h4>
+                        <p className="text-[9px] opacity-40 font-mono">Intelligent formatting & structure</p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => setIsOrganizeEnabled(!isOrganizeEnabled)}
+                      className={cn(
+                        "w-12 h-6 rounded-full transition-all relative",
+                        isOrganizeEnabled ? "bg-accent" : "bg-white/10"
+                      )}
+                    >
+                      <motion.div 
+                        animate={{ x: isOrganizeEnabled ? 26 : 4 }}
+                        className="absolute top-1 w-4 h-4 bg-[var(--bg)] rounded-full shadow-sm"
+                      />
+                    </button>
+                  </div>
+
+                  <motion.button
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    onClick={handleHumanize}
+                    className="w-full py-6 rounded-2xl bg-accent text-[#050505] text-[11px] uppercase tracking-[0.3em] font-bold shadow-2xl shadow-accent/20 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-4"
+                  >
+                    <Zap className="w-5 h-5" />
+                    Proceed to Humanize
+                  </motion.button>
+                </div>
+              )}
             </motion.div>
           )}
 
@@ -582,7 +798,7 @@ Text to humanize: ${inputText}` }] }],
                   </button>
                 </div>
                 <div className="p-8">
-                  <div className="prose prose-invert prose-sm max-w-none font-serif leading-relaxed text-[var(--ink)]/80">
+                  <div className="prose prose-sm max-w-none font-serif leading-relaxed">
                     <TypewriterText text={humanizeResult.rewrittenText} />
                   </div>
                 </div>
@@ -613,7 +829,18 @@ Text to humanize: ${inputText}` }] }],
               </button>
             )}
             <button
-              onClick={handleInvisify}
+              onClick={handleJustOrganize}
+              disabled={isProcessing || !inputText.trim() || !!humanizeResult}
+              className={cn(
+                "flex-1 py-4 rounded-2xl bg-surface border border-[var(--border)] text-[11px] uppercase tracking-widest font-bold hover:bg-[var(--border)] transition-all flex flex-col items-center justify-center active:scale-95 disabled:opacity-50",
+                humanizeResult && "hidden"
+              )}
+            >
+              <Cpu className="w-4 h-4 mb-1" />
+              <span className="text-[7px]">Organize</span>
+            </button>
+            <button
+              onClick={scanResult && !humanizeResult ? handleHumanize : handleScan}
               disabled={isProcessing || !inputText.trim()}
               className={cn(
                 "flex-[2] py-4 rounded-2xl text-[11px] uppercase tracking-widest font-bold transition-all flex items-center justify-center gap-3 relative overflow-hidden group",
@@ -624,8 +851,8 @@ Text to humanize: ${inputText}` }] }],
                 <RefreshCw className="w-4 h-4 animate-spin" />
               ) : (
                 <>
-                  <Zap className="w-4 h-4" />
-                  <span>Invisify</span>
+                  {scanResult && !humanizeResult ? <Zap className="w-4 h-4" /> : <Scan className="w-4 h-4" />}
+                  <span>{scanResult && !humanizeResult ? "Proceed to Humanize" : "Detect AI Trace"}</span>
                 </>
               )}
               {!isProcessing && (
@@ -695,9 +922,9 @@ Text to humanize: ${inputText}` }] }],
                         </span>
                         <span className={cn(
                           "text-[8px] font-mono px-1.5 py-0.5 rounded border",
-                          session.scanResult.classification === "Likely AI" ? "border-danger/30 text-danger" : "border-accent/30 text-accent"
+                          session.scanResult?.classification === "Likely AI" ? "border-danger/30 text-danger" : "border-accent/30 text-accent"
                         )}>
-                          {session.scanResult.aiProbabilityScore}% AI
+                          {session.scanResult ? `${session.scanResult.aiProbabilityScore}% AI` : "Organized"}
                         </span>
                       </div>
                       <p className="text-[11px] line-clamp-2 opacity-70 group-hover:opacity-100 transition-opacity">
