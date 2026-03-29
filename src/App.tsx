@@ -327,11 +327,12 @@ CRITICAL OBJECTIVE: The output must bypass a deep forensic linguistic scan.
 
 STRATEGIES FOR ERASURE:
 1. MAXIMIZE BURSTINESS: Deliberately vary sentence length and structure. Mix short, punchy sentences with longer, more complex ones. Avoid the 'robotic rhythm' of medium-length, perfectly balanced sentences.
-2. INCREASE PERPLEXITY: Use more diverse and less predictable vocabulary. Avoid the most 'statistically likely' word choices that AI models prefer.
+2. INCREASE PERPLEXITY: Use less predictable vocabulary. Avoid the most 'statistically likely' word choices that AI models prefer. This does NOT mean using big or complex words; it means using natural, varied, and sometimes informal language that breaks the 'robotic' pattern.
 3. ELIMINATE AI-ISMS: Remove common AI transition words (e.g., 'Furthermore', 'Moreover', 'In conclusion', 'Additionally', 'It is important to note'). Replace them with more natural, conversational, or varied transitions.
 4. HUMAN RHYTHM: Introduce subtle human-like 'jitter'. This includes starting some sentences with 'And' or 'But' where natural, using contractions consistently, and varying the tempo of the prose.
-5. NO FLUFF: Do not turn it into a story or add unnecessary narrative flourishes. Keep the original tone and intent.
-6. PRESERVE JITTER: If the input text already shows signs of human-like jitter (burstiness, varied sentence lengths), DO NOT smooth it out. Instead, enhance the natural flow while maintaining the 'invisified' state.
+5. SIMPLE, DIRECT LANGUAGE: Use plain, everyday English. Avoid 'big words' or overly academic vocabulary unless the subject matter strictly requires it. Prefer simple, punchy words that a human would actually use in a natural conversation.
+6. NO FLUFF: Do not turn it into a story or add unnecessary narrative flourishes. Keep the original tone and intent.
+7. PRESERVE JITTER: If the input text already shows signs of human-like jitter (burstiness, varied sentence lengths), DO NOT smooth it out. Instead, enhance the natural flow while maintaining the 'invisified' state.
 
 ${isOrganizeEnabled ? `
 INTELLIGENT FORMATTING (ORGANIZE) ENABLED:
