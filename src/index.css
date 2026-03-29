@@ -12,17 +12,15 @@
   --color-warning: #F59E0B;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #050505;
-    --ink: #FFFFFF;
-    --surface: rgba(255, 255, 255, 0.05);
-    --border: rgba(255, 255, 255, 0.1);
-    --glass: rgba(5, 5, 5, 0.8);
-    --color-accent: #00F0FF;
-    --color-danger: #FF4444;
-    --color-warning: #F59E0B;
-  }
+:root.dark {
+  --bg: #050505;
+  --ink: #FFFFFF;
+  --surface: rgba(255, 255, 255, 0.05);
+  --border: rgba(255, 255, 255, 0.1);
+  --glass: rgba(5, 5, 5, 0.8);
+  --color-accent: #00F0FF;
+  --color-danger: #FF4444;
+  --color-warning: #F59E0B;
 }
 
 @theme {

@@ -23,11 +23,18 @@ import {
   Download,
   History,
   Info,
-  Scan
+  Scan,
+  Settings,
+  Home
 } from "lucide-react";
 import { motion, AnimatePresence, useMotionValue, useTransform, animate } from "motion/react";
 import ReactMarkdown from "react-markdown";
+import { BrowserRouter, Routes, Route, Link, useNavigate, useLocation } from "react-router-dom";
 import { cn } from "./lib/utils";
+import { storageService, HistoryItem } from "./services/storageService";
+import { LandingPage } from "./components/LandingPage";
+import { ProfilePage } from "./components/ProfilePage";
+import { SettingsPage } from "./components/SettingsPage";
 
 // --- Types ---
 
@@ -54,8 +61,6 @@ interface ForensicSession {
 }
 
 // --- Constants ---
-
-const GEMINI_MODEL = "gemini-3-flash-preview";
 
 // --- Components ---
 
@@ -137,19 +142,28 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 export default function App() {
   return (
     <ErrorBoundary>
-      <InvisifyApp />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/tool" element={<InvisifyApp />} />
+          <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+        </Routes>
+      </BrowserRouter>
     </ErrorBoundary>
   );
 }
 
 function InvisifyApp() {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [inputText, setInputText] = useState("");
   const [scannedText, setScannedText] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [phase, setPhase] = useState<"idle" | "probe" | "analysis" | "synthesis">("idle");
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [humanizeResult, setHumanizeResult] = useState<HumanizeResult | null>(null);
-  const [isOrganizeEnabled, setIsOrganizeEnabled] = useState(false);
+  const [isOrganizeEnabled, setIsOrganizeEnabled] = useState(storageService.getSettings().autoOrganize);
   const [history, setHistory] = useState<ForensicSession[]>([]);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,7 +173,24 @@ function InvisifyApp() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const settings = storageService.getSettings();
+  const apiKey = settings.customApiKey || process.env.GEMINI_API_KEY;
+
+  const [tone, setTone] = useState<"casual" | "professional" | "academic" | "creative">("professional");
+  const [readingLevel, setReadingLevel] = useState<string | null>(null);
+
+  // Apply Theme
+  useEffect(() => {
+    const root = window.document.documentElement;
+    const theme = settings.theme;
+    
+    if (theme === 'system') {
+      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      root.classList.toggle('dark', systemTheme === 'dark');
+    } else {
+      root.classList.toggle('dark', theme === 'dark');
+    }
+  }, [settings.theme]);
 
   // Reset results if input changes after a scan
   useEffect(() => {
@@ -178,11 +209,17 @@ function InvisifyApp() {
   }, [inputText, isProcessing]);
 
   useEffect(() => {
-    // Load history from localStorage
-    const savedHistory = localStorage.getItem("invisify_history");
-    if (savedHistory) {
-      setHistory(JSON.parse(savedHistory));
-    }
+    // Load history from storageService
+    const savedHistory = storageService.getHistory();
+    // Map HistoryItem to ForensicSession if needed, or just use HistoryItem
+    // For now, let's keep the internal history state synced with storageService
+    setHistory(savedHistory.map(item => ({
+      id: item.id,
+      timestamp: item.timestamp,
+      inputText: item.input,
+      humanizeResult: { rewrittenText: item.output, metricsApplied: [] },
+      scanResult: { aiProbabilityScore: item.score, classification: item.score > 50 ? "Likely AI" : "Likely Human", keyFlags: [], perplexityAnalysis: "", burstinessAnalysis: "" }
+    })));
 
     // PWA Install Prompt
     const handleBeforeInstallPrompt = (e: any) => {
@@ -200,7 +237,16 @@ function InvisifyApp() {
   const saveToHistory = (session: ForensicSession) => {
     const newHistory = [session, ...history].slice(0, 10);
     setHistory(newHistory);
-    localStorage.setItem("invisify_history", JSON.stringify(newHistory));
+    
+    // Save to storageService
+    storageService.addHistoryItem({
+      id: session.id,
+      timestamp: session.timestamp,
+      input: session.inputText,
+      output: session.humanizeResult.rewrittenText,
+      score: session.scanResult?.aiProbabilityScore || 0,
+      readingLevel: readingLevel || undefined
+    });
   };
 
   const getAI = () => {
@@ -224,6 +270,7 @@ function InvisifyApp() {
     setError(null);
     setScanResult(null);
     setHumanizeResult(null);
+    setReadingLevel(null);
 
     try {
       const ai = getAI();
@@ -232,7 +279,7 @@ function InvisifyApp() {
       const startTime = Date.now();
       
       const scanResponse = await ai.models.generateContent({
-        model: GEMINI_MODEL,
+        model: settings.defaultModel,
         contents: [{ role: "user", parts: [{ text: `You are a Forensic Linguistic Analyst. Perform a deep-scan of the provided text to identify 'Robotic Traces' (AI signatures). 
 
 CRITICAL: Distinguish between 'high-quality human writing' and 'AI-generated uniformity'. 
@@ -242,6 +289,7 @@ Analyze:
 2. BURSTINESS (Sentence Rhythm): Does the text have a uniform sentence length and structure? AI often produces 'balanced' sentences of similar length. Human writing is 'bursty'—mixing short, punchy sentences with longer, complex ones.
 3. SCENT DETECTION (AI-isms): Look for repetitive transitions ('Furthermore', 'Moreover'), overly polite or neutral tone, and a lack of idiomatic or colloquial flow.
 4. STRUCTURAL SYMMETRY: AI often creates perfectly symmetrical paragraphs. Humans are more irregular.
+5. READING LEVEL: Analyze the readability (e.g., Grade 8, High School, Academic).
 
 Return JSON: { 
   "aiProbabilityScore": number (0-100), 
@@ -249,7 +297,8 @@ Return JSON: {
   "keyFlags": string[], 
   "perplexityAnalysis": string, 
   "burstinessAnalysis": string, 
-  "scentDetection": string[] 
+  "scentDetection": string[],
+  "readingLevel": string
 }. 
 
 Text to analyze: ${inputText}` }] }],
@@ -263,9 +312,10 @@ Text to analyze: ${inputText}` }] }],
               keyFlags: { type: Type.ARRAY, items: { type: Type.STRING } },
               perplexityAnalysis: { type: Type.STRING },
               burstinessAnalysis: { type: Type.STRING },
-              scentDetection: { type: Type.ARRAY, items: { type: Type.STRING } }
+              scentDetection: { type: Type.ARRAY, items: { type: Type.STRING } },
+              readingLevel: { type: Type.STRING }
             },
-            required: ["aiProbabilityScore", "classification", "keyFlags", "perplexityAnalysis", "burstinessAnalysis", "scentDetection"]
+            required: ["aiProbabilityScore", "classification", "keyFlags", "perplexityAnalysis", "burstinessAnalysis", "scentDetection", "readingLevel"]
           }
         }
       });
@@ -273,6 +323,7 @@ Text to analyze: ${inputText}` }] }],
       if (signal.aborted) return;
 
       const sResult = JSON.parse(scanResponse.text);
+      setReadingLevel(sResult.readingLevel);
 
       // Ensure minimum scanning duration (2s)
       const elapsed = Date.now() - startTime;
@@ -320,10 +371,12 @@ Text to analyze: ${inputText}` }] }],
       const ai = getAI();
       
       const humanizeResponse = await ai.models.generateContent({
-        model: GEMINI_MODEL,
+        model: settings.defaultModel,
         contents: [{ role: "user", parts: [{ text: `You are a Master Stylist and Forensic Eraser. Your task is to 'Invisify' the provided text—completely erasing the robotic trace while maintaining 100% structural fidelity and meaning.
 
 CRITICAL OBJECTIVE: The output must bypass a deep forensic linguistic scan. 
+
+SELECTED TONE: ${tone.toUpperCase()}
 
 STRATEGIES FOR ERASURE:
 1. MAXIMIZE BURSTINESS: Deliberately vary sentence length and structure. Mix short, punchy sentences with longer, more complex ones. Avoid the 'robotic rhythm' of medium-length, perfectly balanced sentences.
@@ -331,8 +384,13 @@ STRATEGIES FOR ERASURE:
 3. ELIMINATE AI-ISMS: Remove common AI transition words (e.g., 'Furthermore', 'Moreover', 'In conclusion', 'Additionally', 'It is important to note'). Replace them with more natural, conversational, or varied transitions.
 4. HUMAN RHYTHM: Introduce subtle human-like 'jitter'. This includes starting some sentences with 'And' or 'But' where natural, using contractions consistently, and varying the tempo of the prose.
 5. SIMPLE, DIRECT LANGUAGE: Use plain, everyday English. Avoid 'big words' or overly academic vocabulary unless the subject matter strictly requires it. Prefer simple, punchy words that a human would actually use in a natural conversation.
-6. NO FLUFF: Do not turn it into a story or add unnecessary narrative flourishes. Keep the original tone and intent.
-7. PRESERVE JITTER: If the input text already shows signs of human-like jitter (burstiness, varied sentence lengths), DO NOT smooth it out. Instead, enhance the natural flow while maintaining the 'invisified' state.
+6. TONE ADHERENCE: Strictly follow the ${tone} tone. 
+   - Casual: Use contractions, some slang, and a relaxed structure.
+   - Professional: Clear, concise, and respectful but not robotic.
+   - Academic: Precise and structured but avoiding the 'AI-academic' template.
+   - Creative: Use metaphors, varied rhythm, and expressive language.
+7. NO FLUFF: Do not turn it into a story or add unnecessary narrative flourishes. Keep the original tone and intent.
+8. PRESERVE JITTER: If the input text already shows signs of human-like jitter (burstiness, varied sentence lengths), DO NOT smooth it out. Instead, enhance the natural flow while maintaining the 'invisified' state.
 
 ${isOrganizeEnabled ? `
 INTELLIGENT FORMATTING (ORGANIZE) ENABLED:
@@ -415,7 +473,7 @@ Text to humanize: ${inputText}` }] }],
       const ai = getAI();
       
       const organizeResponse = await ai.models.generateContent({
-        model: GEMINI_MODEL,
+        model: settings.defaultModel,
         contents: [{ role: "user", parts: [{ text: `You are a Master Document Architect. Your task is to intelligently format and organize the provided text for maximum readability and professional flow.
 DO NOT rewrite the content to 'humanize' it or change the wording significantly. Focus ONLY on structure and formatting.
 - Use Markdown to intelligently format the output.
@@ -553,28 +611,31 @@ Text to organize: ${inputText}` }] }],
 
       {/* Header */}
       <header className="p-6 flex justify-between items-center sticky top-0 z-50 backdrop-blur-md border-b border-[var(--border)] bg-[var(--glass)]">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-accent rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(0,180,216,0.3)] dark:shadow-[0_0_20px_rgba(0,240,255,0.3)]">
+        <Link to="/" className="flex items-center gap-3 group">
+          <div className="w-10 h-10 bg-accent rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(0,180,216,0.3)] dark:shadow-[0_0_20px_rgba(0,240,255,0.3)] group-hover:scale-110 transition-transform">
             <Fingerprint className="w-6 h-6 text-[#050505]" />
           </div>
           <div>
             <h1 className="font-bold text-xl tracking-tight uppercase">Invisify</h1>
             <p className="text-[9px] uppercase tracking-[0.2em] text-accent font-mono">Robotic Trace Erasure</p>
           </div>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="hidden sm:flex flex-col items-end">
-            <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono">Forensic Link</span>
-            <span className="text-[10px] font-mono flex items-center gap-2">
-              <span className={cn("w-1.5 h-1.5 rounded-full animate-pulse", apiKey ? "bg-accent" : "bg-danger")} />
-              {apiKey ? "Secure" : "Offline"}
-            </span>
-          </div>
+        </Link>
+        <div className="flex items-center gap-2 sm:gap-4">
+          <Link to="/" className="p-2 hover:bg-surface rounded-full transition-colors" title="Home">
+            <Home className="w-5 h-5 opacity-40 hover:opacity-100" />
+          </Link>
+          <Link to="/profile" className="p-2 hover:bg-surface rounded-full transition-colors" title="Profile">
+            <User className="w-5 h-5 opacity-40 hover:opacity-100" />
+          </Link>
+          <Link to="/settings" className="p-2 hover:bg-surface rounded-full transition-colors" title="Settings">
+            <Settings className="w-5 h-5 opacity-40 hover:opacity-100" />
+          </Link>
           <button 
             onClick={() => setShowHistory(true)}
             className="p-2 hover:bg-surface rounded-full transition-colors"
+            title="History"
           >
-            <History className="w-5 h-5 opacity-40" />
+            <History className="w-5 h-5 opacity-40 hover:opacity-100" />
           </button>
         </div>
       </header>
@@ -651,9 +712,14 @@ Text to organize: ${inputText}` }] }],
                           transition={{ duration: 1.5, repeat: Infinity }}
                           className="text-[10px] font-mono uppercase tracking-[0.3em] text-accent text-center px-6"
                         >
-                          {phase === "probe" && "Probing Linguistic DNA..."}
-                          {phase === "analysis" && "Forensic Analysis in Progress..."}
-                          {phase === "synthesis" && "Synthesizing Humanized Trace..."}
+                          {phase === "probe" && "Scanning for Robotic Signatures..."}
+                          {phase === "analysis" && "Deconstructing Linguistic Patterns..."}
+                          {phase === "synthesis" && (
+                            <div className="flex flex-col gap-1">
+                              <span>Synthesizing Human Trace...</span>
+                              <span className="text-[8px] opacity-50">Applying {tone} jitter & variance</span>
+                            </div>
+                          )}
                         </motion.span>
                       </div>
                     </div>
@@ -715,6 +781,10 @@ Text to organize: ${inputText}` }] }],
                   </span>
                 </div>
                 <div className="p-6 bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl flex flex-col items-center justify-center text-center">
+                  <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono mb-2">Readability</span>
+                  <span className="text-sm font-bold uppercase tracking-tight text-accent">{readingLevel || "Analyzing..."}</span>
+                </div>
+                <div className="p-6 bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl flex flex-col items-center justify-center text-center">
                   <span className="text-[9px] uppercase tracking-widest opacity-40 font-mono mb-2">Scents</span>
                   <span className="text-3xl font-mono font-bold">{scanResult.scentDetection?.length || 0}</span>
                 </div>
@@ -736,9 +806,31 @@ Text to organize: ${inputText}` }] }],
                 </div>
               )}
 
-              {/* Proceed to Humanize Action */}
+              {/* Tone Selection Action */}
               {!humanizeResult && !isProcessing && (
                 <div className="space-y-4">
+                  <div className="bg-surface backdrop-blur-xl border border-[var(--border)] rounded-2xl p-6">
+                    <h3 className="text-[10px] uppercase tracking-widest font-bold font-mono text-accent mb-4 flex items-center gap-2">
+                      <Zap className="w-3 h-3" /> Select Target Tone
+                    </h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {(["casual", "professional", "academic", "creative"] as const).map((t) => (
+                        <button
+                          key={t}
+                          onClick={() => setTone(t)}
+                          className={cn(
+                            "py-3 px-4 rounded-xl text-[10px] uppercase font-bold tracking-widest transition-all border",
+                            tone === t 
+                              ? "bg-accent text-[#050505] border-accent" 
+                              : "bg-surface border-[var(--border)] opacity-40 hover:opacity-100"
+                          )}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   <div className="flex items-center justify-between p-4 bg-surface border border-[var(--border)] rounded-2xl">
                     <div className="flex items-center gap-3">
                       <div className={cn(
